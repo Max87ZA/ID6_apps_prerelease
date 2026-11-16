@@ -422,10 +422,19 @@ int main(int argc, char **argv) {
     int ethanol=0;
     uint64_t next_ethanol=0;
 #endif
+#ifdef HYBRID_PAGE
+    /* F30 330e extras for the Hybrid data page: electric range and total range (km),
+     * HV pack voltage (V), 12 V system voltage (V), engine oil temperature (C). */
+    double hybrid[7] = {0}; /* + fuel level (%), outside temperature (C) */
+    uint64_t hybrid_seen[7] = {0}, hybrid_retry[6] = {0};
+    uint64_t next_hybrid = 0, next_hybrid_send = 0;
+    unsigned hybrid_step = 0;
+#endif
     for (i = 1; i < (unsigned)argc; ++i) {
         if (!strcmp(argv[i], "--demo")) demo = 1;
 #ifdef PERF_LAB
         else if (!strcmp(argv[i], "--ethanol")) ethanol = 1;
+        else if (!strcmp(argv[i], "--hv-soc")) ethanol = 2;
 #endif
         else if (!strcmp(argv[i], "--session")) session = 1;
         else if (!strcmp(argv[i], "--trace")) trace_reads = 1;
@@ -510,7 +519,31 @@ int main(int argc, char **argv) {
                 f.value[i-1]=v; observed[i-1]=bd_mono_ms(); f.valid |= 1u << (i-1);
             }
 #ifdef PERF_LAB
-            if (gw>=0 && ethanol && start>=next_ethanol && running) {
+            if (gw>=0 && ethanol==2 && start>=next_ethanol && running) {
+                /* F30 330e: hybrid battery ECU (SME, 0x07) displayed charge level.
+                 * 22 DD BC returns three big-endian words in 0.1 %; the first matched
+                 * the instrument cluster at one observed point (78.9 vs 78 %). The bar
+                 * reuses the ethanol slot. */
+                const unsigned char query[]={0x22,0xdd,0xbc}, prefix[]={0x62,0xdd,0xbc};
+                unsigned char reply[9];
+                unsigned negative;
+                const int n=exchange(gw,0x07,query,sizeof query,prefix,sizeof prefix,
+                                     reply,sizeof reply,180,&negative);
+                const unsigned raw=n==9 ? ((unsigned)reply[3]<<8)|reply[4] : 0xffffu;
+                f.valid &= ~(1u<<BD_ETHANOL);
+                if (raw<=1000) {
+                    observed[BD_ETHANOL]=bd_mono_ms();
+                    f.value[BD_ETHANOL]=raw/10.0;
+                    f.valid |= 1u<<BD_ETHANOL;
+                    next_ethanol=observed[BD_ETHANOL]+5000;
+                } else {
+                    next_ethanol=bd_mono_ms()+30000;
+                    if (n<0 && n!=-2) {
+                        release_gateway(&gw,&lock);
+                        retry_at=bd_mono_ms()+DIAGNOSTIC_RETRY_MS;
+                    }
+                }
+            } else if (gw>=0 && ethanol && start>=next_ethanol && running) {
                 /* Published MHD+ MG1 monitor layout. This is the tune's active
                  * ethanol percentage, distinct from the raw ECA sensor. */
                 const unsigned char query[]={0x2c,0x88,0x01}, prefix[]={0x6c,0x88};
@@ -533,6 +566,58 @@ int main(int argc, char **argv) {
                 }
             }
 #endif
+#ifdef HYBRID_PAGE
+            if (gw>=0 && ethanol==2 && start>=next_hybrid && running) {
+                /* One read-only request per turn, about every 500 ms, so the fast
+                 * gauges keep their rhythm. Each value was matched once against the
+                 * car on 2026-11-15 except the oil temperature, which is unverified. */
+                static const struct { unsigned char ecu, query[3], size, reply; } reads[] = {
+                    {0x60,{0x22,0xd1,0x11},3,15}, /* cluster: words 0 and 2 are ranges in 0.1 km */
+                    {0x07,{0x22,0xdd,0xb4},3,5},  /* battery ECU: pack voltage in 0.01 V */
+                    {0x12,{0x01,0x42,0},2,4},     /* OBD control module voltage in mV */
+                    {0x12,{0x01,0x5c,0},2,3},     /* OBD engine oil temperature, C + 40 */
+                    {0x12,{0x01,0x2f,0},2,3},     /* OBD fuel tank level, 255 = 100 % */
+                    {0x12,{0x01,0x46,0},2,3}      /* OBD ambient air temperature, C + 40 */
+                };
+                const unsigned k = hybrid_step++ % 6;
+                next_hybrid = bd_mono_ms()+350;
+                if (start >= hybrid_retry[k]) {
+                    unsigned char prefix[3], reply[64];
+                    unsigned negative;
+                    int n;
+                    memcpy(prefix,reads[k].query,reads[k].size);
+                    prefix[0] = (unsigned char)(prefix[0]+0x40);
+                    n = exchange(gw,reads[k].ecu,reads[k].query,reads[k].size,prefix,reads[k].size,
+                                 reply,sizeof reply,180,&negative);
+                    if (n == reads[k].reply) {
+                        const uint64_t now = bd_mono_ms();
+                        if (k == 0) {
+                            const unsigned e=((unsigned)reply[3]<<8)|reply[4];
+                            const unsigned t=((unsigned)reply[7]<<8)|reply[8];
+                            if (e <= 2000) { hybrid[0]=e/10.0; hybrid_seen[0]=now; }
+                            if (t <= 20000) { hybrid[1]=t/10.0; hybrid_seen[1]=now; }
+                        } else if (k == 1) {
+                            const unsigned v=((unsigned)reply[3]<<8)|reply[4];
+                            if (v >= 15000 && v <= 45000) { hybrid[2]=v/100.0; hybrid_seen[2]=now; }
+                        } else if (k == 2) {
+                            const unsigned v=((unsigned)reply[2]<<8)|reply[3];
+                            if (v >= 5000 && v <= 20000) { hybrid[3]=v/1000.0; hybrid_seen[3]=now; }
+                        } else if (k == 4) {
+                            hybrid[5]=reply[2]*100.0/255.0; hybrid_seen[5]=now;
+                        } else if (reply[2] != 0xff) {
+                            const unsigned slot = k == 3 ? 4 : 6;
+                            hybrid[slot]=(double)reply[2]-40; hybrid_seen[slot]=now;
+                        }
+                    } else {
+                        hybrid_retry[k]=bd_mono_ms()+30000;
+                        if (n<0 && n!=-2) {
+                            release_gateway(&gw,&lock);
+                            retry_at=bd_mono_ms()+DIAGNOSTIC_RETRY_MS;
+                        }
+                    }
+                }
+            }
+#endif
             if (gw>=0) {
                 scanned=1;
                 if (session && gateway_should_yield(lock,bd_mono_ms(),lease_until)) {
@@ -542,6 +627,22 @@ int main(int argc, char **argv) {
             }
         }
         if (!send_frame(sock,&dest,&f,observed)) { perror("send frame"); running=0; }
+#ifdef HYBRID_PAGE
+        if (ethanol==2 && bd_mono_ms()>=next_hybrid_send) {
+            /* A second, separate datagram type keeps the gauge frame format unchanged. */
+            char text[160];
+            const uint64_t now = bd_mono_ms();
+            unsigned valid = 0;
+            int size;
+            for (i=0;i<7;++i) if (hybrid_seen[i] && now-hybrid_seen[i]<6000) valid |= 1u<<i;
+            size = snprintf(text,sizeof text,"NBH2 %llu %u %.1f %.1f %.2f %.3f %.0f %.1f %.0f\n",
+                            (unsigned long long)now,valid,hybrid[0],hybrid[1],hybrid[2],hybrid[3],hybrid[4],
+                            hybrid[5],hybrid[6]);
+            if (size>0 && (size_t)size<sizeof text)
+                (void)sendto(sock,text,(size_t)size,0,(struct sockaddr*)&dest,sizeof dest);
+            next_hybrid_send = now+500;
+        }
+#endif
         ++count;
         {
             uint64_t elapsed = bd_mono_ms()-start;

@@ -31,7 +31,7 @@ const unsigned kDataUpdateMessage = 0x40000003u;
 const unsigned kPollKey = 0x4244504cu; // BDPL, private to this app
 const unsigned kActivePollIntervalMs = 25u;
 const unsigned kIdlePollIntervalMs = 250u;
-const char kGateway[] = "169.254.21.3";
+const char kGateway[] = "169.254.24.115";
 const char kCollector[] = "/var/opt/hmi/data/ID5/Plugins/BoostDeck/boostdeck-collector-qnx";
 const unsigned kBarCount = sizeof(kDialScales)/sizeof(kDialScales[0]);
 #ifdef PERF_LAB
@@ -40,6 +40,18 @@ const unsigned kEthanolFirst = 56100u;
 const unsigned kEthanolSteps = 20u;
 #else
 typedef char dial_count_check[kBarCount == BD_COUNT ? 1 : -1];
+#endif
+#ifdef HYBRID_PAGE
+#ifndef PERF_LAB
+#error HYBRID_PAGE needs PERF_LAB (it uses the units setting)
+#endif
+const unsigned kHybridValues = 7u;        // values in the collector's NBH2 datagram
+const unsigned kHybridTiles = 8u;         // tiles on the Hybrid page (one is derived)
+const unsigned kHybridState = 105u;
+const unsigned kHybridFirstModel = 120u;  // tile value labels 120..127
+const unsigned kHybridFirstImage = 130u;  // tile bar images 130..137
+const unsigned kHybridFirstBar = 500u;    // tile bar components 500..507
+const unsigned kHybridStaleMs = 6000u;
 #endif
 }
 
@@ -60,6 +72,18 @@ class BoostDeck : public bmw::PluginApp {
     void selectColor(unsigned color);
     char labels_[BD_COUNT][128];
     unsigned images_[BD_COUNT];
+#ifdef HYBRID_PAGE
+    // Second screen (HMI state 105): eight tiles fed by the collector's NBH2 datagram.
+    unsigned pages_;                 // bit 0: gauges visible, bit 1: hybrid page visible
+    double hybrid_[kHybridValues];
+    unsigned hybrid_valid_;
+    uint64_t hybrid_received_;
+    char hybrid_labels_[kHybridTiles][64];
+    unsigned hybrid_images_[kHybridTiles];
+    void parseHybrid(const char* data, size_t size);
+    void refreshHybrid();
+#endif
+    void setVisible(bool visible);
     void postPoll();
 public:
     BoostDeck(bmw::IDispatcher& d, bmw::BasicString<char> name, unsigned maj, unsigned mn,
@@ -68,9 +92,12 @@ public:
           received_(0), collector_(-1), stopping_(false), gauges_visible_(false),
           color_(0),
 #ifdef PERF_LAB
-          metric_(false),
+          metric_(true),
 #endif
           retry_at_(0) {
+#ifdef HYBRID_PAGE
+        pages_=0;
+#endif
         resetDisplay();
     }
     virtual ~BoostDeck() { shutdown(); }
@@ -78,6 +105,9 @@ public:
     virtual bool onFinalize() { shutdown(); return true; }
     virtual bool invokeDataUpdate(unsigned key, const bmw::Parcel& data);
     bool gaugeVisibility(const bmw::Parcel&);
+#ifdef HYBRID_PAGE
+    bool hybridVisibility(const bmw::Parcel&);
+#endif
     template <unsigned Color> bool changeColor(const bmw::Parcel&) {
         selectColor(Color);
         return true;
@@ -106,6 +136,9 @@ public:
     }
     void shutdown() {
         gauges_visible_=false;
+#ifdef HYBRID_PAGE
+        pages_=0;
+#endif
         stopCollector();
         if (fd_>=0) { close(fd_); fd_=-1; }
     }
@@ -113,6 +146,11 @@ public:
         memset(&frame_,0,sizeof frame_); memset(labels_,0,sizeof labels_);
         memset(images_,0,sizeof images_);
         received_=0;
+#ifdef HYBRID_PAGE
+        memset(hybrid_,0,sizeof hybrid_); memset(hybrid_labels_,0,sizeof hybrid_labels_);
+        memset(hybrid_images_,0,sizeof hybrid_images_);
+        hybrid_valid_=0; hybrid_received_=0;
+#endif
     }
     void refresh();
     void poll();
@@ -134,6 +172,10 @@ bool BoostDeck::onInit() {
     // BMW sends event 11 with a bool when this HMI state becomes visible or hidden.
     action.m_exec=&bmw::Delegate<bool,const bmw::Parcel&>::execImpl<BoostDeck,&BoostDeck::gaugeVisibility>;
     addHandler(100u,11u,action);
+#ifdef HYBRID_PAGE
+    action.m_exec=&bmw::Delegate<bool,const bmw::Parcel&>::execImpl<BoostDeck,&BoostDeck::hybridVisibility>;
+    addHandler(kHybridState,11u,action);
+#endif
     typedef bmw::Delegate<bool,const bmw::Parcel&> Action;
     typedef bool (*Handler)(void*,const bmw::Parcel&);
     static const Handler colorHandlers[] = {
@@ -163,6 +205,12 @@ bool BoostDeck::onInit() {
     selectColor(color_);
     bmw::Parcel visible(true);
     for (unsigned i=0;i<kBarCount;++i) setProperty(200u+i,3u,visible);
+#ifdef HYBRID_PAGE
+    for (unsigned i=0;i<kHybridTiles;++i) setProperty(kHybridFirstBar+i,3u,visible);
+    // Labels shown beside the toolbar icons when the side toolbar is open.
+    updateModel(140u,bmw::BasicString<char>("Engine"));
+    updateModel(141u,bmw::BasicString<char>("Hybrid"));
+#endif
     refresh();
     if (fd_>=0) {
         ++poll_generation_;
@@ -173,7 +221,28 @@ bool BoostDeck::onInit() {
 
 bool BoostDeck::gaugeVisibility(const bmw::Parcel& event) {
     bool visible;
-    if (!event.readBool(visible) || gauges_visible_==visible) return true;
+    if (!event.readBool(visible)) return true;
+#ifdef HYBRID_PAGE
+    pages_ = visible ? pages_|1u : pages_&~1u;
+    visible = pages_!=0;
+#endif
+    setVisible(visible);
+    return true;
+}
+
+#ifdef HYBRID_PAGE
+bool BoostDeck::hybridVisibility(const bmw::Parcel& event) {
+    bool visible;
+    if (!event.readBool(visible)) return true;
+    pages_ = visible ? pages_|2u : pages_&~2u;
+    setVisible(pages_!=0);
+    return true;
+}
+#endif
+
+// The collector runs while either screen is showing.
+void BoostDeck::setVisible(bool visible) {
+    if (gauges_visible_==visible) return;
     gauges_visible_=visible;
     if (visible) {
         retry_at_=0;
@@ -182,16 +251,20 @@ bool BoostDeck::gaugeVisibility(const bmw::Parcel& event) {
         stopCollector();
         received_=0;
         memset(&frame_,0,sizeof frame_);
+#ifdef HYBRID_PAGE
+        hybrid_received_=0;
+#endif
         refresh();
     }
-    return true;
 }
 
 void BoostDeck::startVisibleCollector() {
     if (!gauges_visible_ || collector_>0 || fd_<0 ||
         bd_mono_ms()<retry_at_) return;
     const char *args[]={kCollector,"--host",kGateway,"--session",
-#ifdef PERF_LAB
+#if defined(PERF_LAB) && defined(HV_SOC_BAR)
+                       "--hv-soc",
+#elif defined(PERF_LAB)
                        "--ethanol",
 #endif
                        0};
@@ -241,9 +314,82 @@ void BoostDeck::poll() {
             (!received_ || next.sent_ms>=received_)) {
             frame_=next; received_=next.sent_ms; // queued UDP does not reset sample age
         }
+#ifdef HYBRID_PAGE
+        else if (gauges_visible_ && !stopping_ && k>5 && !memcmp(data,"NBH2 ",5))
+            parseHybrid(data,static_cast<size_t>(k));
+#endif
     }
     refresh();
 }
+
+#ifdef HYBRID_PAGE
+void BoostDeck::parseHybrid(const char* data, size_t size) {
+    char text[200];
+    unsigned long long sent;
+    unsigned valid;
+    double v[kHybridValues];
+    if (size>=sizeof text || memchr(data,0,size)) return;
+    memcpy(text,data,size); text[size]=0;
+    if (sscanf(text,"NBH2 %llu %u %lf %lf %lf %lf %lf %lf %lf",&sent,&valid,
+               &v[0],&v[1],&v[2],&v[3],&v[4],&v[5],&v[6])!=9) return;
+    if (!sent || sent>bd_mono_ms() || valid>=(1u<<kHybridValues) ||
+        (hybrid_received_ && sent<hybrid_received_)) return;
+    for (unsigned i=0;i<kHybridValues;++i) hybrid_[i]=v[i];
+    hybrid_valid_=valid;
+    hybrid_received_=sent;
+}
+
+void BoostDeck::refreshHybrid() {
+    // Tiles in layout order (column by column, like the gauge page). Each takes one
+    // datagram value, except petrol range, which is total range minus electric range.
+    // Wire order: 0 electric km, 1 total km, 2 HV volts, 3 12 V volts, 4 oil C, 5 fuel %, 6 outside C.
+    enum Kind { kDistance1, kDistance0, kPercent, kVolts0, kVolts1, kTemperature };
+    static const struct { unsigned need; int a, b; Kind kind; double lo, hi; } tiles[kHybridTiles] = {
+        {1u<<0,      0,-1, kDistance1,   0,  40},   // ELECTRIC RANGE
+        {3u,         1, 0, kDistance0,   0, 600},   // PETROL RANGE
+        {1u<<1,      1,-1, kDistance0,   0, 700},   // TOTAL RANGE
+        {1u<<5,      5,-1, kPercent,     0, 100},   // FUEL LEVEL
+        {1u<<2,      2,-1, kVolts0,    240, 340},   // HV VOLTAGE
+        {1u<<3,      3,-1, kVolts1,     11,  15},   // 12 V BATTERY
+        {1u<<4,      4,-1, kTemperature, 0, 150},   // OIL TEMP
+        {1u<<6,      6,-1, kTemperature,-20, 40}    // OUTSIDE TEMP
+    };
+    const bool live = hybrid_received_ && bd_mono_ms()-hybrid_received_<kHybridStaleMs;
+    for (unsigned i=0;i<kHybridTiles;++i) {
+        char label[64];
+        unsigned image = kBarFirst;
+        if (live && (hybrid_valid_&tiles[i].need)==tiles[i].need) {
+            double x=hybrid_[tiles[i].a];
+            if (tiles[i].b>=0) x-=hybrid_[tiles[i].b];
+            if (x<0 && tiles[i].kind!=kTemperature) x=0;
+            switch (tiles[i].kind) {
+            case kDistance1: snprintf(label,sizeof label,"%.1f %s",metric_ ? x : x*0.621371,metric_ ? "km" : "mi"); break;
+            case kDistance0: snprintf(label,sizeof label,"%.0f %s",metric_ ? x : x*0.621371,metric_ ? "km" : "mi"); break;
+            case kPercent:   snprintf(label,sizeof label,"%.0f%%",x); break;
+            case kVolts0:    snprintf(label,sizeof label,"%.0f V",x); break;
+            case kVolts1:    snprintf(label,sizeof label,"%.1f V",x); break;
+            default:         snprintf(label,sizeof label,"%.0f %s",metric_ ? x : x*1.8+32,metric_ ? "\260C" : "\260F");
+            }
+            double fraction=(x-tiles[i].lo)/(tiles[i].hi-tiles[i].lo);
+            if (fraction<0) fraction=0;
+            if (fraction>1) fraction=1;
+            const unsigned step=static_cast<unsigned>(fraction*kDialSteps+.5);
+            if (step) {
+                const unsigned palette = color_ == kMulticolor ? kMulticolor + i : color_;
+                image += palette*kDialSteps+step;
+            }
+        } else strcpy(label,"--");
+        if (image!=hybrid_images_[i]) {
+            updateModel(kHybridFirstImage+i,bmw::ImageID(image));
+            hybrid_images_[i]=image;
+        }
+        if (strcmp(label,hybrid_labels_[i])) {
+            updateModel(kHybridFirstModel+i,bmw::BasicString<char>(label));
+            strcpy(hybrid_labels_[i],label);
+        }
+    }
+}
+#endif
 
 void BoostDeck::refresh() {
     uint64_t elapsed=received_ ? bd_mono_ms()-received_ : static_cast<uint64_t>(BD_STALE_MS);
@@ -297,18 +443,32 @@ void BoostDeck::refresh() {
     const bool valid = received_ && bd_is_fresh(&frame_,BD_ETHANOL,elapsed) &&
         frame_.value[BD_ETHANOL]>=0 && frame_.value[BD_ETHANOL]<=100;
     char ethanol[128];
+#ifdef HV_SOC_BAR
+    // The cluster showed 78 % for a raw 78.9 %, so truncate rather than round.
+    if (valid) snprintf(ethanol,sizeof ethanol,"%d%%",static_cast<int>(frame_.value[BD_ETHANOL]));
+#else
     if (valid) snprintf(ethanol,sizeof ethanol,"%.0f%%",frame_.value[BD_ETHANOL]);
+#endif
     else strcpy(ethanol,"--");
     const unsigned step=valid ? static_cast<unsigned>(frame_.value[BD_ETHANOL]*kEthanolSteps/100.+.5) : 0;
     const unsigned ethanolImage=kEthanolFirst+(step ? color_*kEthanolSteps+step : 0);
     if (images_[BD_ETHANOL]!=ethanolImage) {
         updateModel(68u,bmw::ImageID(ethanolImage));
+#ifdef HYBRID_PAGE
+        updateModel(138u,bmw::ImageID(ethanolImage)); // same bar on the Hybrid page
+#endif
         images_[BD_ETHANOL]=ethanolImage;
     }
     if (strcmp(labels_[BD_ETHANOL],ethanol)) {
         updateModel(58u,bmw::BasicString<char>(ethanol));
+#ifdef HYBRID_PAGE
+        updateModel(128u,bmw::BasicString<char>(ethanol));
+#endif
         strcpy(labels_[BD_ETHANOL],ethanol);
     }
+#endif
+#ifdef HYBRID_PAGE
+    refreshHybrid();
 #endif
 }
 

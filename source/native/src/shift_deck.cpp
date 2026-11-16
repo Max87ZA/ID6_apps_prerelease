@@ -165,7 +165,7 @@ public:
           rpm_(-2),kph_(-2),shift_(false) {
         memset(&frame_,0,sizeof frame_);
 #ifdef NATIVE_SHIFT_SMOOTH
-        metric_=false;
+        metric_=true;
         rpm_from_=0;
         rpm_started_=0;
 #endif
@@ -228,7 +228,7 @@ public:
         reap();
         uint64_t now=bd_mono_ms();
         if (visible_ && child_<=0 && now>=retry_at_) {
-            const char* args[]={kShiftWorker,"--host","169.254.21.3",0};
+            const char* args[]={kShiftWorker,"--host","169.254.24.115",0};
             child_=launch(args,-1);
             retry_at_=now+1000;
         }
