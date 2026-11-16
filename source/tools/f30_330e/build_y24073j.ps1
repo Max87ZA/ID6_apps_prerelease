@@ -17,8 +17,9 @@ function Run($label, $list) {
     if ($LASTEXITCODE -ne 0) { throw "$label failed with exit code $LASTEXITCODE" }
 }
 Run "core.o" ($C + @("-DPERF_LAB", "-Isrc", "-O2", "-fPIC", "-c", "src/gauge_core.c", "-o", "out/core.o"))
-Run "libBoostDeck.so" ($X + @("-DPERF_LAB", "-DHV_SOC_BAR", "-DHYBRID_PAGE", "-Isrc", "-Isdk", "-O2", "-fno-strict-aliasing", "-fno-exceptions", "-fPIC", "-shared", "src/plugin.cpp", "out/core.o") + $fw + $L + @("-Wl,--allow-shlib-undefined", "-Wl,-soname,libBoostDeck.so", "-o", "out/libBoostDeck.so"))
+Run "libBoostDeck.so" ($X + @("-DPERF_LAB", "-DHV_SOC_BAR", "-DHYBRID_PAGE", "-DFLAP_PAGE", "-Isrc", "-Isdk", "-O2", "-fno-strict-aliasing", "-fno-exceptions", "-fPIC", "-shared", "src/plugin.cpp", "out/core.o") + $fw + $L + @("-Wl,--allow-shlib-undefined", "-Wl,-soname,libBoostDeck.so", "-o", "out/libBoostDeck.so"))
 Run "boostdeck-collector-qnx" ($C + @("-DNATIVE_FAST", "-DPERF_LAB", "-DHYBRID_PAGE","-Isrc", "-O2", "src/collector.c", "out/core.o") + $L + @("-o", "out/boostdeck-collector-qnx"))
+Run "exhaust-flap-qnx" ($C + @("-Isrc", "-O2", "-DFLAP_ONLY", "src/collector.c", "out/core.o") + $L + @("-o", "out/exhaust-flap-qnx"))
 Run "libShiftDeck.so" ($X + @("-DPERF_LAB", "-Isrc", "-Isdk", "-O2", "-fno-strict-aliasing", "-fno-exceptions", "-fPIC", "-shared", "-DNATIVE_SHIFT_SMOOTH", "src/shift_deck.cpp", "out/core.o") + $fw + $L + @("-Wl,--allow-shlib-undefined", "-Wl,-soname,libShiftDeck.so", "-o", "out/libShiftDeck.so"))
 Run "shift-deck-qnx" ($C + @("-DNATIVE_FAST", "-Isrc", "-O2", "-DSHIFT_DECK_ONLY", "src/collector.c", "out/core.o") + $L + @("-o", "out/shift-deck-qnx"))
 Run "libEngineCodes.so" ($X + @("-DPERF_LAB", "-Isrc", "-Isdk", "-O2", "-fno-strict-aliasing", "-fno-exceptions", "-fPIC", "-shared", "src/engine_codes.cpp", "out/core.o") + $fw + $L + @("-Wl,--allow-shlib-undefined", "-Wl,-soname,libEngineCodes.so", "-o", "out/libEngineCodes.so"))

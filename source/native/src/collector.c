@@ -258,6 +258,56 @@ int main(int argc, char **argv) {
     close(lock);
     return 0;
 }
+#elif defined(FLAP_ONLY)
+/* F30 330e exhaust flap: DME (0x12) input/output control 2F 60 FD.
+ * 03 is a short-term adjustment with the open or close parameters used by the B58
+ * flap apps; 00 returns control to the DME ("auto"). Tested parked on the car on
+ * 2026-11-16: open and close moved the actuator and auto was accepted.
+ * The gauge collector holds the shared gateway lock and only yields it for about 165 ms
+ * when asked, so the lock is polled every 20 ms. The gateway sometimes resets a new
+ * connection, so a failed connection or exchange is retried for up to 6 seconds. */
+int main(int argc, char **argv) {
+    static const unsigned char open_flap[]={0x2f,0x60,0xfd,0x03,0x14,0xfe};
+    static const unsigned char close_flap[]={0x2f,0x60,0xfd,0x03,0x23,0x28};
+    static const unsigned char auto_flap[]={0x2f,0x60,0xfd,0x00};
+    static const char *const names[]={"on auto","open","closed"};
+    const char *host=0;
+    const unsigned char *request;
+    unsigned char prefix[4], reply[16];
+    unsigned port=6801, value=3, negative=0, size, busy=0, unreachable=0, silent=0;
+    uint64_t deadline;
+    int fd, lock=-1, n=-1, i;
+    for (i=1;i<argc;++i) {
+        if (!strcmp(argv[i],"--host") && i+1<argc && !host) host=argv[++i];
+        else if (!strcmp(argv[i],"--port") && i+1<argc) port=number(argv[++i],1,65535);
+        else if (!strcmp(argv[i],"--flap") && i+1<argc && value>2) value=number(argv[++i],0,2);
+        else return 2;
+    }
+    if (!host || value>2) return 2;
+    signal(SIGINT,stop); signal(SIGTERM,stop); signal(SIGPIPE,SIG_IGN);
+    request = value==1 ? open_flap : value==2 ? close_flap : auto_flap;
+    size = value ? sizeof open_flap : sizeof auto_flap;
+    prefix[0]=0x6f; prefix[1]=0x60; prefix[2]=0xfd; prefix[3]=request[3];
+    deadline=bd_mono_ms()+6000;
+    while (running && n==-1 && bd_mono_ms()<deadline) {
+        if (lock<0) lock=reserve_gateway();
+        if (lock<0) { ++busy; poll(0,0,20); continue; }   /* asking makes the collector yield */
+        fd=connect_gw(host,port);
+        if (fd<0) ++unreachable;
+        else {
+            n=exchange(fd,0x12,request,size,prefix,sizeof prefix,reply,sizeof reply,1600,&negative);
+            close(fd);
+            if (n==-1) ++silent;
+        }
+        if (n==-1) { close(lock); lock=-1; poll(0,0,400); }
+    }
+    if (lock>=0) close(lock);
+    if (n>=4) printf("Confirmed: Exhaust flap %s\n",names[value]);
+    else if (n==-2) printf("Exhaust flap request refused by DME (NRC %02X)\n",negative);
+    else printf("Exhaust flap: no reply from DME (lock %u, connect %u, reply %u). Try again.\n",
+                busy,unreachable,silent);
+    return 0;
+}
 #elif defined(SHIFT_DECK_ONLY)
 #include "drive_frame.h"
 

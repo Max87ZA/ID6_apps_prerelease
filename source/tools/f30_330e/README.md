@@ -25,7 +25,35 @@ All framework functions the three plugins import exist in this firmware's
   (`-DHV_SOC_BAR`, collector option `--hv-soc`). The ethanol path is still built without the flag.
 - BoostDeck gains a second page, "Hybrid" (`-DHYBRID_PAGE`), and is displayed as
   "Elina's Dashboard". Both pages are `toolbarHmiState` screens with a left icon toolbar.
+- BoostDeck gains a third page, "Exhaust flap" (`-DFLAP_PAGE`), with OPEN, AUTO and CLOSE tiles.
+  Requests go through a new one-shot worker, `exhaust-flap-qnx` (`collector.c` built with
+  `-DFLAP_ONLY`). The gauge collector is paused while that page is open.
 - `probe_signals.py` accepts ECU `07` (hybrid battery ECU).
+
+## Exhaust flap
+
+Unlike everything else here, this is an active command to the engine ECU. It uses DME `12`,
+input/output control `2F` on identifier `60 FD`, the same requests as the Bootmod3 flap control
+in `controls.c` and the 740i ExhaustFlap package, without the Bootmod3 ROM check.
+
+| Tile | Request | Meaning |
+| --- | --- | --- |
+| OPEN | `2F 60 FD 03 14 FE` | short-term adjustment, flap open |
+| CLOSE | `2F 60 FD 03 23 28` | short-term adjustment, flap closed |
+| AUTO | `2F 60 FD 00` | return control to the DME |
+
+All three were accepted by this car's DME (`6F 60 FD ..`), and open and close moved the actuator,
+with ignition on and engine off. The highlighted tile is the last accepted command, not a
+measured flap position; it starts on AUTO after an iDrive restart. How long an override lasts
+before the DME takes over again was not determined.
+
+Two things had to be handled for the worker to get through on the car:
+
+- The HMI keeps the gauge page (state 100) reported visible while a child toolbar page is open,
+  so the gauge collector kept running. The flap page now stops it on its own visibility event.
+- The collector re-takes the shared gateway lock about 165 ms after yielding it. The worker polls
+  the lock every 20 ms and keeps trying for up to 6 seconds; on failure the status line shows
+  `(lock, connect, reply)` counts.
 
 ## Signals added for this car
 
@@ -61,7 +89,9 @@ Electric motor torque was not found. ECU address `1A` does not answer on this ca
 | `build_y24073j.ps1` | Builds the three apps with a Windows-hosted QNX SDP 6.5 (expects `C:\QNX650`), using the same compiler flags as `native/build.sh`. ShiftDeck needs `-fno-strict-aliasing` to match the packaged release. |
 | `relabel_bar.py` | Redraws the bar caption in BoostDeck's background image. |
 | `make_hybrid_assets.py` | Produced the intermediate layout with a menu screen and the Hybrid page background. |
-| `make_toolbar_assets.py` | Produces the final toolbar layout and artwork from that intermediate layout. |
+| `make_toolbar_assets.py` | Produces the toolbar layout and artwork from that intermediate layout. |
+| `make_flap_page.py` | Adds the Exhaust flap page, its tiles and its toolbar icon to the toolbar layout. |
+| `flap_test.py` | Parked test of the three flap requests from a PC (active command; always ends with AUTO). |
 | `scan_dids.py`, `list_ecus.py` | Read-only discovery of which ECUs and identifiers answer. |
 | `compare_readback.py` | Compares a tar read back from the head unit with the local app folders. |
 
@@ -72,8 +102,8 @@ the layout steps cannot be re-run on it as it stands.
 
 ## Not in this branch
 
-- The image archive. `BoostDeck.xml` here needs images `56301`, `56310`, `56311` and `56312` and
-  a redrawn `56300`, which are not in the packaged `dashboard.zip`. Image archives are ignored by
+- The image archive. `BoostDeck.xml` here needs images `56301`, `56310` to `56313` and `56320` to
+  `56325`, and a redrawn `56300`, which are not in the packaged `dashboard.zip`. Image archives are ignored by
   `source/.gitignore`, as upstream intends.
 - Built binaries, the car's framework libraries, VIN, captures and scan results.
 - The native host tests were not run for these changes (no host C compiler on the build PC).

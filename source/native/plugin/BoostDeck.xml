@@ -11,6 +11,7 @@
       <hmiAction id="31" target="104" />
       <hmiAction id="32" target="105" />
       <hmiAction id="34" target="100" />
+      <hmiAction id="38" target="106" />
       <raAction id="40" />
       <raAction id="41" />
       <raAction id="42" />
@@ -22,6 +23,9 @@
       <raAction id="48" />
       <raAction id="49" />
       <raAction id="59" />
+      <raAction id="35" />
+      <raAction id="36" />
+      <raAction id="37" />
     </actions>
     <models>
       <raDataModel id="50" modelType="Richtext" />
@@ -68,6 +72,12 @@
       <imageIdModel id="73" imageId="56312" />
       <raDataModel id="140" modelType="Richtext" />
       <raDataModel id="141" modelType="Richtext" />
+      <imageIdModel id="74" imageId="56313" />
+      <raDataModel id="142" modelType="Richtext" />
+      <raDataModel id="145" modelType="Richtext" />
+      <imageIdModel id="150" imageId="56320" />
+      <imageIdModel id="151" imageId="56323" />
+      <imageIdModel id="152" imageId="56324" />
     </models>
     <hmiStates>
       <toolbarHmiState id="100" text="Engine">
@@ -261,6 +271,7 @@
         <toolbarComponents>
           <button id="440" imageModel="71" tooltipModel="140" text="Engine" />
           <button id="441" imageModel="72" tooltipModel="141" text="Hybrid" action="32" />
+          <button id="444" imageModel="74" tooltipModel="142" text="Exhaust flap" action="38" />
         </toolbarComponents>
       </toolbarHmiState>
       <hmiState id="104" parentId="100" text="Gauge color">
@@ -463,6 +474,78 @@
         <toolbarComponents>
           <button id="442" imageModel="71" tooltipModel="140" text="Engine" action="34" />
           <button id="443" imageModel="72" tooltipModel="141" text="Hybrid" />
+          <button id="445" imageModel="74" tooltipModel="142" text="Exhaust flap" action="38" />
+        </toolbarComponents>
+      </toolbarHmiState>
+      <toolbarHmiState id="106" parentId="100" text="Exhaust flap">
+        <components>
+          <image id="600" model="150">
+            <properties>
+              <property id="20" value="24" />
+              <property id="21" value="60" />
+              <property id="9" value="340" />
+              <property id="10" value="230" />
+              <property id="2" value="false" />
+              <property id="3" value="true" />
+            </properties>
+          </image>
+          <button id="610" action="35" imageModel="73">
+            <properties>
+              <property id="20" value="24" />
+              <property id="21" value="60" />
+              <property id="9" value="340" />
+              <property id="10" value="230" />
+            </properties>
+          </button>
+          <image id="601" model="151">
+            <properties>
+              <property id="20" value="400" />
+              <property id="21" value="60" />
+              <property id="9" value="340" />
+              <property id="10" value="230" />
+              <property id="2" value="false" />
+              <property id="3" value="true" />
+            </properties>
+          </image>
+          <button id="611" action="36" imageModel="73">
+            <properties>
+              <property id="20" value="400" />
+              <property id="21" value="60" />
+              <property id="9" value="340" />
+              <property id="10" value="230" />
+            </properties>
+          </button>
+          <image id="602" model="152">
+            <properties>
+              <property id="20" value="776" />
+              <property id="21" value="60" />
+              <property id="9" value="340" />
+              <property id="10" value="230" />
+              <property id="2" value="false" />
+              <property id="3" value="true" />
+            </properties>
+          </image>
+          <button id="612" action="37" imageModel="73">
+            <properties>
+              <property id="20" value="776" />
+              <property id="21" value="60" />
+              <property id="9" value="340" />
+              <property id="10" value="230" />
+            </properties>
+          </button>
+          <label id="620" model="145">
+            <properties>
+              <property id="20" value="34" />
+              <property id="21" value="320" />
+              <property id="9" value="1072" />
+              <property id="10" value="50" />
+            </properties>
+          </label>
+        </components>
+        <toolbarComponents>
+          <button id="446" imageModel="71" tooltipModel="140" text="Engine" action="34" />
+          <button id="447" imageModel="72" tooltipModel="141" text="Hybrid" action="32" />
+          <button id="448" imageModel="74" tooltipModel="142" text="Exhaust flap" />
         </toolbarComponents>
       </toolbarHmiState>
     </hmiStates>

@@ -53,6 +53,17 @@ const unsigned kHybridFirstImage = 130u;  // tile bar images 130..137
 const unsigned kHybridFirstBar = 500u;    // tile bar components 500..507
 const unsigned kHybridStaleMs = 6000u;
 #endif
+#ifdef FLAP_PAGE
+#ifndef HYBRID_PAGE
+#error FLAP_PAGE needs HYBRID_PAGE (it shares the toolbar)
+#endif
+// Third screen (HMI state 106): exhaust flap OPEN / AUTO / CLOSE through a one-shot worker.
+const char kFlapWorker[] = "/var/opt/hmi/data/ID5/Plugins/BoostDeck/exhaust-flap-qnx";
+const unsigned kFlapStatusModel = 145u;
+const unsigned kFlapFirstTileModel = 150u;  // tiles left to right: OPEN, AUTO, CLOSE
+const unsigned kFlapFirstImage = 56320u;    // per tile: off image, then on image
+const unsigned kFlapClearKey = 0x464c4150u; // FLAP, private to this app
+#endif
 }
 
 class BoostDeck : public bmw::PluginApp {
@@ -83,7 +94,47 @@ class BoostDeck : public bmw::PluginApp {
     void parseHybrid(const char* data, size_t size);
     void refreshHybrid();
 #endif
+#ifdef FLAP_PAGE
+    pid_t flap_child_;
+    int flap_pipe_;
+    unsigned flap_mode_;      // last confirmed: 0 auto, 1 open, 2 closed
+    unsigned flap_pending_;
+    unsigned flap_generation_;
+    char flap_result_[128];
+    size_t flap_used_;
+    void flapStatus(const char* text) { updateModel(kFlapStatusModel,bmw::BasicString<char>(text)); }
+    void showFlap() {
+        static const unsigned order[3] = {1u,0u,2u};   // OPEN, AUTO, CLOSE
+        for (unsigned i=0;i<3;++i)
+            updateModel(kFlapFirstTileModel+i,
+                        bmw::ImageID(kFlapFirstImage+i*2+(flap_mode_==order[i] ? 1u : 0u)));
+    }
+    void reapFlap() {
+        if (flap_child_<=0) return;
+        pid_t ended=waitpid(flap_child_,0,WNOHANG);
+        if (ended==flap_child_ || (ended<0 && errno==ECHILD)) flap_child_=-1;
+    }
+    void stopFlap() {
+        ++flap_generation_;
+        if (flap_pipe_>=0) { close(flap_pipe_); flap_pipe_=-1; }
+        reapFlap();
+        if (flap_child_>0) kill(flap_child_,SIGTERM);
+    }
+    void pollFlap();
+public:
+    template <unsigned Mode> bool requestFlap(const bmw::Parcel&);
+private:
+#endif
     void setVisible(bool visible);
+#ifdef HYBRID_PAGE
+    // pages_ bits: 1 gauge page, 2 hybrid page, 4 flap page.
+    bool collectorWanted() const {
+#ifdef FLAP_PAGE
+        if (pages_&4u) return false;
+#endif
+        return (pages_&3u)!=0;
+    }
+#endif
     void postPoll();
 public:
     BoostDeck(bmw::IDispatcher& d, bmw::BasicString<char> name, unsigned maj, unsigned mn,
@@ -98,6 +149,10 @@ public:
 #ifdef HYBRID_PAGE
         pages_=0;
 #endif
+#ifdef FLAP_PAGE
+        flap_child_=-1; flap_pipe_=-1; flap_mode_=0; flap_pending_=0; flap_generation_=0;
+        flap_used_=0; flap_result_[0]=0;
+#endif
         resetDisplay();
     }
     virtual ~BoostDeck() { shutdown(); }
@@ -107,6 +162,9 @@ public:
     bool gaugeVisibility(const bmw::Parcel&);
 #ifdef HYBRID_PAGE
     bool hybridVisibility(const bmw::Parcel&);
+#endif
+#ifdef FLAP_PAGE
+    bool flapVisibility(const bmw::Parcel&);
 #endif
     template <unsigned Color> bool changeColor(const bmw::Parcel&) {
         selectColor(Color);
@@ -140,6 +198,9 @@ public:
         pages_=0;
 #endif
         stopCollector();
+#ifdef FLAP_PAGE
+        stopFlap();
+#endif
         if (fd_>=0) { close(fd_); fd_=-1; }
     }
     void resetDisplay() {
@@ -176,6 +237,10 @@ bool BoostDeck::onInit() {
     action.m_exec=&bmw::Delegate<bool,const bmw::Parcel&>::execImpl<BoostDeck,&BoostDeck::hybridVisibility>;
     addHandler(kHybridState,11u,action);
 #endif
+#ifdef FLAP_PAGE
+    action.m_exec=&bmw::Delegate<bool,const bmw::Parcel&>::execImpl<BoostDeck,&BoostDeck::flapVisibility>;
+    addHandler(106u,11u,action);
+#endif
     typedef bmw::Delegate<bool,const bmw::Parcel&> Action;
     typedef bool (*Handler)(void*,const bmw::Parcel&);
     static const Handler colorHandlers[] = {
@@ -211,6 +276,17 @@ bool BoostDeck::onInit() {
     updateModel(140u,bmw::BasicString<char>("Engine"));
     updateModel(141u,bmw::BasicString<char>("Hybrid"));
 #endif
+#ifdef FLAP_PAGE
+    updateModel(142u,bmw::BasicString<char>("Exhaust flap"));
+    action.m_exec=&Action::execImpl<BoostDeck,&BoostDeck::requestFlap<1> >;
+    addHandler(35u,action);
+    action.m_exec=&Action::execImpl<BoostDeck,&BoostDeck::requestFlap<0> >;
+    addHandler(36u,action);
+    action.m_exec=&Action::execImpl<BoostDeck,&BoostDeck::requestFlap<2> >;
+    addHandler(37u,action);
+    showFlap();
+    flapStatus("");
+#endif
     refresh();
     if (fd_>=0) {
         ++poll_generation_;
@@ -224,7 +300,7 @@ bool BoostDeck::gaugeVisibility(const bmw::Parcel& event) {
     if (!event.readBool(visible)) return true;
 #ifdef HYBRID_PAGE
     pages_ = visible ? pages_|1u : pages_&~1u;
-    visible = pages_!=0;
+    visible = collectorWanted();
 #endif
     setVisible(visible);
     return true;
@@ -235,7 +311,19 @@ bool BoostDeck::hybridVisibility(const bmw::Parcel& event) {
     bool visible;
     if (!event.readBool(visible)) return true;
     pages_ = visible ? pages_|2u : pages_&~2u;
-    setVisible(pages_!=0);
+    setVisible(collectorWanted());
+    return true;
+}
+#endif
+
+#ifdef FLAP_PAGE
+// On the car the gauge page still counts as visible while the flap page is open, so the
+// flap page stops the collector itself and leaves the diagnostic gateway to the flap worker.
+bool BoostDeck::flapVisibility(const bmw::Parcel& event) {
+    bool visible;
+    if (!event.readBool(visible)) return true;
+    pages_ = visible ? pages_|4u : pages_&~4u;
+    setVisible(collectorWanted());
     return true;
 }
 #endif
@@ -290,7 +378,65 @@ void BoostDeck::postPoll() {
     post(message, collector_ > 0 ? kActivePollIntervalMs : kIdlePollIntervalMs);
 }
 
+#ifdef FLAP_PAGE
+template <unsigned Mode> bool BoostDeck::requestFlap(const bmw::Parcel&) {
+    reapFlap();
+    if (flap_pipe_>=0 || flap_child_>0) return true;   // one request at a time
+    ++flap_generation_;
+    int channel[2];
+    if (pipe(channel)<0) { flapStatus("Could not start the flap request"); return true; }
+    const char argument[]={static_cast<char>('0'+Mode),0};
+    const char* args[]={kFlapWorker,"--host",kGateway,"--flap",argument,0};
+    if (fcntl(channel[0],F_SETFL,O_NONBLOCK)>=0 &&
+        fcntl(channel[0],F_SETFD,FD_CLOEXEC)>=0 && fcntl(channel[1],F_SETFD,FD_CLOEXEC)>=0)
+        flap_child_=launch(args,channel[1]);
+    close(channel[1]);
+    if (flap_child_<0) {
+        close(channel[0]);
+        flapStatus("Could not start the flap request");
+        return true;
+    }
+    flap_pipe_=channel[0];
+    flap_used_=0;
+    flap_pending_=Mode;
+    flapStatus("Sending request...");
+    return true;
+}
+
+// Called from poll(), which runs on every UI tick while the app is loaded.
+void BoostDeck::pollFlap() {
+    if (flap_pipe_>=0) {
+        ssize_t n=read(flap_pipe_,flap_result_+flap_used_,sizeof flap_result_-1-flap_used_);
+        if (n>0) flap_used_+=static_cast<size_t>(n);
+        else if (n==0 || (errno!=EINTR && errno!=EAGAIN && errno!=EWOULDBLOCK)) {
+            close(flap_pipe_);
+            flap_pipe_=-1;
+            while (flap_used_ && (flap_result_[flap_used_-1]=='\n' || flap_result_[flap_used_-1]=='\r'))
+                --flap_used_;
+            flap_result_[flap_used_]=0;
+            flapStatus(flap_used_ ? flap_result_ : "No result received from the flap worker.");
+            if (!strncmp(flap_result_,"Confirmed: ",11)) {
+                flap_mode_=flap_pending_;
+                showFlap();
+                bmw::Parcel clear;
+                clear.writeUInt32(kFlapClearKey);
+                clear.writeUInt32(flap_generation_);
+                post(bmw::Message(kDataUpdateMessage,clear),3500u);
+            }
+        }
+    }
+    reapFlap();
+}
+#endif
+
 bool BoostDeck::invokeDataUpdate(unsigned key, const bmw::Parcel& data) {
+#ifdef FLAP_PAGE
+    if (key==kFlapClearKey) {
+        unsigned generation;
+        if (data.readUInt32(generation) && generation==flap_generation_ && flap_pipe_<0) flapStatus("");
+        return true;
+    }
+#endif
     if (key!=kPollKey) return bmw::PluginApp::invokeDataUpdate(key,data);
     unsigned generation;
     if (!data.readUInt32(generation)) return false;
@@ -303,6 +449,9 @@ bool BoostDeck::invokeDataUpdate(unsigned key, const bmw::Parcel& data) {
 void BoostDeck::poll() {
     reapCollector();
     startVisibleCollector();
+#ifdef FLAP_PAGE
+    pollFlap();
+#endif
     // A bounded non-blocking drain: at most 8 * 512 bytes per UI tick.
     char data[BD_MAX_PACKET];
     for (unsigned n=0;fd_>=0 && n<8;++n) {
